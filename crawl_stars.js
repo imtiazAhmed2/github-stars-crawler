@@ -61,62 +61,35 @@ async function upsertRepo(client, repo) {
   await client.query(query2, [repo.id, repo.stargazerCount]);
 }
 
-async function crawl(target = 100000) {
-  console.log(`Fetching ${target} repositories...`);
-
-  const client = new Client({
-    host: DB_HOST,
-    user: DB_USER,
-    password: DB_PASS,
-    database: DB_NAME,
-  });
-  await client.connect();
-
-  // const query = `
-  //   query ($cursor: String) {
-  //     search(query: "stars:>100", type: REPOSITORY, first: 50, after: $cursor) {
-  //       repositoryCount
-  //       pageInfo { endCursor hasNextPage }
-  //       nodes {
-  //         id
-  //         name
-  //         nameWithOwner
-  //         stargazerCount
-  //         url
-  //         owner { login }
-  //       }
-  //     }
-  //     rateLimit { remaining resetAt }
-  //   }
-  // `;
-
+// ⬇️ new function to crawl by language
+async function crawlLanguage(client, language, targetPerLang, totalTarget, currentCount) {
+  console.log(`\n🌐 Crawling language: ${language}`);
 
   const query = `
-  query ($cursor: String) {
-    search(query: "stars:>100", type: REPOSITORY, first: 50, after: $cursor) {
-      repositoryCount
-      pageInfo { endCursor hasNextPage }
-      nodes {
-        ... on Repository {
-          id
-          name
-          nameWithOwner
-          stargazerCount
-          url
-          owner { login }
+    query ($cursor: String, $lang: String!) {
+      search(query: $lang, type: REPOSITORY, first: 50, after: $cursor) {
+        repositoryCount
+        pageInfo { endCursor hasNextPage }
+        nodes {
+          ... on Repository {
+            id
+            name
+            nameWithOwner
+            stargazerCount
+            url
+            owner { login }
+          }
         }
       }
+      rateLimit { remaining resetAt }
     }
-    rateLimit { remaining resetAt }
-  }
-`;
-
+  `;
 
   let cursor = null;
-  let count = 0;
+  let langCount = 0;
 
-  while (count < target) {
-    const data = await runQuery(query, { cursor });
+  while (langCount < targetPerLang && currentCount < totalTarget) {
+    const data = await runQuery(query, { cursor, lang: `language:${language} stars:>10` });
     if (!data) continue;
 
     const repos = data.search.nodes;
@@ -125,9 +98,11 @@ async function crawl(target = 100000) {
 
     for (const repo of repos) {
       await upsertRepo(client, repo);
-      count++;
-      console.log(`Saved ${repo.nameWithOwner} (${repo.stargazerCount}⭐) [${count}/${target}]`);
-      if (count >= target) break;
+      langCount++;
+      currentCount++;
+      console.log(`💾 ${repo.nameWithOwner} (${repo.stargazerCount}⭐) [${currentCount}/${totalTarget}]`);
+
+      if (langCount >= targetPerLang || currentCount >= totalTarget) break;
     }
 
     cursor = pageInfo.endCursor;
@@ -141,8 +116,36 @@ async function crawl(target = 100000) {
     }
   }
 
+  console.log(`✅ Finished language: ${language} (${langCount} repos)\n`);
+  return currentCount;
+}
+
+async function crawl(totalTarget = 100000) {
+  console.log(`Fetching up to ${totalTarget} repositories...`);
+
+  const client = new Client({
+    host: DB_HOST,
+    user: DB_USER,
+    password: DB_PASS,
+    database: DB_NAME,
+  });
+  await client.connect();
+
+  const languages = [
+    "JavaScript", "Python", "Java", "Go", "C++", "C#", "TypeScript",
+    "PHP", "Ruby", "Swift", "Rust", "Kotlin", "Dart", "Scala", "Elixir"
+  ];
+
+  const targetPerLang = Math.ceil(totalTarget / languages.length);
+  let currentCount = 0;
+
+  for (const lang of languages) {
+    currentCount = await crawlLanguage(client, lang, targetPerLang, totalTarget, currentCount);
+    if (currentCount >= totalTarget) break;
+  }
+
   await client.end();
-  console.log("✅ Done crawling.");
+  console.log("🎯 Done crawling all languages.");
 }
 
 // CLI argument
