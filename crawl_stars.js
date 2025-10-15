@@ -12,22 +12,33 @@ const client = new Client({
   database: "github_data",
 });
 
+async function sleep(ms) {
+  return new Promise(r => setTimeout(r, ms));
+}
+
 async function runQuery(query, variables) {
-  const res = await fetch(GRAPHQL_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${TOKEN}`,
-    },
-    body: JSON.stringify({ query, variables }),
-  });
-  const json = await res.json();
-  if (!res.ok || json.errors) {
-    console.error("Query error:", json.errors || res.status);
-    await new Promise(r => setTimeout(r, 5000));
+  try {
+    const res = await fetch(GRAPHQL_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${TOKEN}`,
+      },
+      body: JSON.stringify({ query, variables }),
+    });
+
+    const json = await res.json();
+    if (!res.ok || json.errors) {
+      console.error("❌ Query error:", json.errors || res.status);
+      await sleep(5000);
+      return null;
+    }
+    return json.data;
+  } catch (err) {
+    console.error("⚠️ Network error:", err.message);
+    await sleep(5000);
     return null;
   }
-  return json.data;
 }
 
 async function upsertRepo(repo) {
@@ -52,10 +63,10 @@ async function upsertRepo(repo) {
   await client.query(q2, [repo.id, repo.stargazerCount]);
 }
 
-async function crawlSearch(queryString, totalTarget) {
+async function crawlSearch(queryString, maxRepos, seenIds, totalTarget) {
   const query = `
     query ($cursor: String, $q: String!) {
-      search(query: $q, type: REPOSITORY, first: 50, after: $cursor) {
+      search(query: $q, type: REPOSITORY, first: 100, after: $cursor) {
         repositoryCount
         pageInfo { endCursor hasNextPage }
         nodes {
@@ -72,9 +83,11 @@ async function crawlSearch(queryString, totalTarget) {
       rateLimit { remaining resetAt }
     }
   `;
-  let cursor = null, count = 0;
 
-  while (count < totalTarget) {
+  let cursor = null;
+  let count = 0;
+
+  while (count < maxRepos && seenIds.size < totalTarget) {
     const data = await runQuery(query, { cursor, q: queryString });
     if (!data) continue;
 
@@ -83,9 +96,13 @@ async function crawlSearch(queryString, totalTarget) {
     const rate = data.rateLimit;
 
     for (const repo of repos) {
+      if (seenIds.has(repo.id)) continue;
+      seenIds.add(repo.id);
       await upsertRepo(repo);
       count++;
-      console.log(`💾 ${repo.nameWithOwner} (${repo.stargazerCount}⭐) — ${count}`);
+      console.log(`💾 [${seenIds.size}/${totalTarget}] ${repo.nameWithOwner} (${repo.stargazerCount}⭐)`);
+
+      if (seenIds.size >= totalTarget) break;
     }
 
     cursor = pageInfo.endCursor;
@@ -94,20 +111,24 @@ async function crawlSearch(queryString, totalTarget) {
     if (rate.remaining < 5) {
       const wait = Math.max((new Date(rate.resetAt) - Date.now()) / 1000, 10);
       console.log(`⏳ Waiting ${Math.ceil(wait)}s for rate reset...`);
-      await new Promise(r => setTimeout(r, wait * 1000));
+      await sleep(wait * 1000);
     }
   }
 
-  console.log(`✅ Finished search: ${queryString} (${count} repos)`);
+  console.log(`✅ Finished ${queryString} (${count} new repos added)`);
   return count;
 }
 
 async function crawlAll() {
   await client.connect();
 
-  const languages = ["JavaScript","Python","Java","TypeScript","C++","C","C#","Go","PHP","Ruby","Swift","Kotlin","Rust","Scala","Dart","Shell","R","Objective-C",
-                     "Perl","Haskell","Lua","Elixir","Clojure","Julia","VBA","Visual Basic","MATLAB","PowerShell","Groovy","Assembly","F#","Erlang","Vim Script",
-                     "PL/SQL","Fortran"];
+  const languages = [
+    "JavaScript","Python","Java","TypeScript","C++","C","C#","Go","PHP","Ruby",
+    "Swift","Kotlin","Rust","Scala","Dart","Shell","R","Objective-C","Perl","Haskell","Lua",
+    "Elixir","Clojure","Julia","VBA","MATLAB","PowerShell","Groovy","Assembly","F#",
+    "Erlang","Vim Script","PL/SQL","Fortran"
+  ];
+
   const starRanges = [
     "stars:>10000",
     "stars:5000..9999",
@@ -115,22 +136,28 @@ async function crawlAll() {
     "stars:500..999",
     "stars:100..499",
     "stars:50..99",
-    "stars:10..49"
+    "stars:10..49",
+    "stars:1..9"
   ];
 
-  let total = 0;
+  const seenIds = new Set();
+  const TARGET = 100000;
+
   for (const lang of languages) {
     for (const range of starRanges) {
+      if (seenIds.size >= TARGET) break;
+
+      const remaining = TARGET - seenIds.size;
+      const perQueryTarget = Math.min(1000, remaining); // fetch up to 1k per query
       const q = `language:${lang} ${range}`;
-      console.log(`\n🚀 Crawling ${q}`);
-      const count = await crawlSearch(q, 1000);
-      total += count;
-      if (total >= 100000) break;
+      console.log(`\n🚀 Crawling ${q} (need ${remaining} more)`);
+
+      await crawlSearch(q, perQueryTarget, seenIds, TARGET);
     }
-    if (total >= 100000) break;
+    if (seenIds.size >= TARGET) break;
   }
 
-  console.log(`🎯 Total collected: ${total} repositories`);
+  console.log(`🎯 Total collected: ${seenIds.size} repositories`);
   await client.end();
 }
 
