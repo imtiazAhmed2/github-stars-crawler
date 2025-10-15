@@ -72,12 +72,32 @@ async function crawl(target = 100) {
   });
   await client.connect();
 
+  // const query = `
+  //   query ($cursor: String) {
+  //     search(query: "stars:>100", type: REPOSITORY, first: 50, after: $cursor) {
+  //       repositoryCount
+  //       pageInfo { endCursor hasNextPage }
+  //       nodes {
+  //         id
+  //         name
+  //         nameWithOwner
+  //         stargazerCount
+  //         url
+  //         owner { login }
+  //       }
+  //     }
+  //     rateLimit { remaining resetAt }
+  //   }
+  // `;
+
+
   const query = `
-    query ($cursor: String) {
-      search(query: "stars:>100", type: REPOSITORY, first: 50, after: $cursor) {
-        repositoryCount
-        pageInfo { endCursor hasNextPage }
-        nodes {
+  query ($cursor: String) {
+    search(query: "stars:>100", type: REPOSITORY, first: 50, after: $cursor) {
+      repositoryCount
+      pageInfo { endCursor hasNextPage }
+      nodes {
+        ... on Repository {
           id
           name
           nameWithOwner
@@ -86,9 +106,11 @@ async function crawl(target = 100) {
           owner { login }
         }
       }
-      rateLimit { remaining resetAt }
     }
-  `;
+    rateLimit { remaining resetAt }
+  }
+`;
+
 
   let cursor = null;
   let count = 0;
