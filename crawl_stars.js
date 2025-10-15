@@ -1,5 +1,4 @@
 // crawl_stars.js
-
 import fetch from "node-fetch";
 import pg from "pg";
 
@@ -7,7 +6,6 @@ const { Client } = pg;
 const TOKEN = process.env.GITHUB_TOKEN || process.env.GITHUB_TOKEN_DEFAULT;
 const GRAPHQL_URL = "https://api.github.com/graphql";
 
-// ✅ Create and define the Postgres client at top-level scope
 const client = new Client({
   host: "localhost",
   user: "postgres",
@@ -16,12 +14,10 @@ const client = new Client({
   port: 5432,
 });
 
-// Utility function for sleep/delay
 async function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// Run GraphQL query with retry mechanism
 async function runQuery(query, variables) {
   try {
     const res = await fetch(GRAPHQL_URL, {
@@ -34,7 +30,6 @@ async function runQuery(query, variables) {
     });
 
     const json = await res.json();
-
     if (!res.ok || json.errors) {
       console.error("❌ Query error:", json.errors || res.status);
       await sleep(5000);
@@ -49,7 +44,6 @@ async function runQuery(query, variables) {
   }
 }
 
-// Insert or update repo data in DB
 async function upsertRepo(repo) {
   const q1 = `
     INSERT INTO repositories (repo_id, name, owner, full_name, stars, url, fetched_at)
@@ -57,7 +51,6 @@ async function upsertRepo(repo) {
     ON CONFLICT (repo_id)
     DO UPDATE SET stars=EXCLUDED.stars, fetched_at=EXCLUDED.fetched_at;
   `;
-
   const q2 = `
     INSERT INTO repo_stars_daily (repo_id, stars)
     VALUES ($1,$2)
@@ -77,8 +70,7 @@ async function upsertRepo(repo) {
   await client.query(q2, [repo.id, repo.stargazerCount]);
 }
 
-// Crawl a specific query string
-async function crawlSearch(queryString, maxRepos, seenIds, totalTarget) {
+async function crawlSearch(queryString, seenIds, totalTarget) {
   const query = `
     query ($cursor: String, $q: String!) {
       search(query: $q, type: REPOSITORY, first: 100, after: $cursor) {
@@ -99,11 +91,10 @@ async function crawlSearch(queryString, maxRepos, seenIds, totalTarget) {
   `;
 
   let cursor = null;
-  let count = 0;
 
-  while (count < maxRepos && seenIds.size < totalTarget) {
+  while (seenIds.size < totalTarget) {
     const data = await runQuery(query, { cursor, q: queryString });
-    if (!data) continue;
+    if (!data) break;
 
     const repos = data.search.nodes;
     const pageInfo = data.search.pageInfo;
@@ -113,7 +104,6 @@ async function crawlSearch(queryString, maxRepos, seenIds, totalTarget) {
       if (seenIds.has(repo.id)) continue;
       seenIds.add(repo.id);
       await upsertRepo(repo);
-      count++;
       console.log(`💾 [${seenIds.size}/${totalTarget}] ${repo.nameWithOwner} (${repo.stargazerCount}⭐)`);
 
       if (seenIds.size >= totalTarget) break;
@@ -128,18 +118,19 @@ async function crawlSearch(queryString, maxRepos, seenIds, totalTarget) {
       await sleep(wait * 1000);
     }
   }
-
-  console.log(`✅ Finished ${queryString} (${count} new repos added)`);
 }
 
-// Main crawl function
 async function crawlAll() {
   await client.connect();
   console.log("✅ Connected to PostgreSQL");
 
- const languages = ["JavaScript","Python","Java","TypeScript","C++","C","C#","Go","PHP","Ruby","Swift","Kotlin","Rust","Scala","Dart","Shell","R","Objective-C",
-                     "Perl","Haskell","Lua","Elixir","Clojure","Julia","VBA","Visual Basic","MATLAB","PowerShell","Groovy","Assembly","F#","Erlang","Vim Script",
-                     "PL/SQL","Fortran"];
+  const languages = [
+    "JavaScript","Python","Java","TypeScript","C++","C","C#","Go","PHP","Ruby",
+    "Swift","Kotlin","Rust","Scala","Dart","Shell","R","Objective-C","Perl","Haskell","Lua",
+    "Elixir","Clojure","Julia","VBA","Visual Basic","MATLAB","PowerShell","Groovy","Assembly","F#",
+    "Erlang","Vim Script","PL/SQL","Fortran"
+  ];
+
   const starRanges = [
     "stars:>10000",
     "stars:5000..9999",
@@ -147,22 +138,19 @@ async function crawlAll() {
     "stars:500..999",
     "stars:100..499",
     "stars:50..99",
-    "stars:10..49"
-  ];
+    "stars:10..49",
+    "stars:1..9"
+  ];
 
   const seenIds = new Set();
-  const TARGET = parseInt(process.argv[2]?.split("=")[1]) || 100000; // Allow --target=100000
+  const TARGET = parseInt(process.argv[2]?.split("=")[1]) || 100000;
 
   for (const lang of languages) {
     for (const range of starRanges) {
       if (seenIds.size >= TARGET) break;
-
-      const remaining = TARGET - seenIds.size;
-      const perQueryTarget = Math.min(1000, remaining);
       const q = `language:${lang} ${range}`;
-      console.log(`\n🚀 Crawling ${q} (need ${remaining} more)`);
-
-      await crawlSearch(q, perQueryTarget, seenIds, TARGET);
+      console.log(`\n🚀 Crawling ${q} (need ${TARGET - seenIds.size} more)`);
+      await crawlSearch(q, seenIds, TARGET);
     }
     if (seenIds.size >= TARGET) break;
   }
@@ -172,5 +160,4 @@ async function crawlAll() {
   console.log("🧹 Database connection closed");
 }
 
-// Start crawler
 crawlAll().catch(console.error);
