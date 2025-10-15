@@ -1,7 +1,9 @@
-name: Crawl GitHub Stars (Node.js)
+name: Crawl GitHub Stars
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: # manual trigger
+  schedule:
+    - cron: "0 2 * * *" # run daily at 2 AM UTC
 
 jobs:
   crawl-stars:
@@ -9,13 +11,13 @@ jobs:
 
     services:
       postgres:
-        image: postgres:15
-        ports:
-          - 5432:5432
+        image: postgres:14
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: github_data
+        ports:
+          - 5432:5432
         options: >-
           --health-cmd="pg_isready -U postgres"
           --health-interval=10s
@@ -23,42 +25,61 @@ jobs:
           --health-retries=5
 
     steps:
-      - name: Checkout code
+      - name: Checkout repo
         uses: actions/checkout@v4
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: 20
 
       - name: Install dependencies
-        run: npm install
+        run: npm ci || npm install
 
-      - name: Setup Postgres schema
-        env:
-          PGPASSWORD: postgres
+      - name: Wait for PostgreSQL
         run: |
-          sudo apt-get install -y postgresql-client
-          psql -h localhost -U postgres -d github_data -f schema.sql
+          until pg_isready -h localhost -U postgres; do
+            echo "Waiting for postgres..."
+            sleep 3
+          done
 
-      - name: Run GitHub crawler
+      - name: Create database schema
+        run: |
+          psql postgresql://postgres:postgres@localhost:5432/github_data <<'SQL'
+          CREATE TABLE IF NOT EXISTS repositories (
+            repo_id TEXT PRIMARY KEY,
+            name TEXT,
+            owner TEXT,
+            full_name TEXT,
+            stars INT,
+            url TEXT,
+            fetched_at TIMESTAMP
+          );
+
+          CREATE TABLE IF NOT EXISTS repo_stars_daily (
+            repo_id TEXT,
+            stars INT,
+            snapshot_date DATE DEFAULT CURRENT_DATE,
+            PRIMARY KEY (repo_id, snapshot_date)
+          );
+          SQL
+
+      - name: Run crawler
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
           DB_HOST: localhost
           DB_USER: postgres
           DB_PASS: postgres
           DB_NAME: github_data
-        run: node crawl_stars.js --target 100
+        run: node crawler.js --target=100000
 
-      - name: Dump database and upload artifact
-        env:
-          PGPASSWORD: postgres
+      - name: Dump database to CSV
         run: |
-          mkdir -p dump
-          pg_dump -h localhost -U postgres -d github_data > dump/github_data.sql
+          pg_dump --data-only --column-inserts --table=repositories \
+          postgresql://postgres:postgres@localhost:5432/github_data > repos.csv
 
-      - name: Upload artifact
+      - name: Upload CSV artifact
         uses: actions/upload-artifact@v4
         with:
-          name: github-data
-          path: dump/github_data.sql
+          name: github-stars-data
+          path: repos.csv
