@@ -2,20 +2,21 @@ name: Crawl GitHub Stars (Node.js)
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: '0 3 * * *'  # daily at 03:00 UTC
 
 jobs:
-  crawl-stars:
+  crawl:
     runs-on: ubuntu-latest
-
     services:
       postgres:
         image: postgres:15
-        ports:
-          - 5432:5432
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: github_data
+        ports:
+          - 5432:5432
         options: >-
           --health-cmd="pg_isready -U postgres"
           --health-interval=10s
@@ -23,28 +24,32 @@ jobs:
           --health-retries=5
 
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
+      - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: 20
 
-      # Install dependencies (create package-lock.json if missing)
-      - name: Install dependencies
+      - name: Install deps
+        run: npm ci
+
+      - name: Wait for Postgres
         run: |
-          npm install
-          ls -R   # 🧩 Debug step to list all files and confirm crawl_stars.js is present
+          for i in $(seq 1 30); do
+            pg_isready -h localhost -p 5432 -U postgres && break
+            echo "waiting for postgres..."
+            sleep 2
+          done
 
-      - name: Setup Postgres schema
+      - name: Apply schema
         env:
           PGPASSWORD: postgres
         run: |
-          sudo apt-get install -y postgresql-client
           psql -h localhost -U postgres -d github_data -f schema.sql
 
-      - name: Run GitHub crawler
+      - name: Run crawler
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DB_HOST: localhost
@@ -52,25 +57,17 @@ jobs:
           DB_PASS: postgres
           DB_NAME: github_data
         run: |
-          if [ -f "crawl_stars.js" ]; then
-            echo "✅ Found crawl_stars.js in root"
-            node crawl_stars.js
-          elif [ -f "src/crawl_stars.js" ]; then
-            echo "✅ Found crawl_stars.js in src folder"
-            node src/crawl_stars.js
-          else
-            echo "❌ crawl_stars.js not found!"; ls -R; exit 1
-          fi
+          node crawl_stars.js --target=100000
 
-      - name: Dump database and upload artifact
+      - name: Export repositories CSV
         env:
           PGPASSWORD: postgres
         run: |
-          mkdir -p dump
-          pg_dump -h localhost -U postgres -d github_data > dump/github_data.sql
+          mkdir -p artifacts
+          psql -h localhost -U postgres -d github_data -c "\copy (SELECT * FROM repositories) TO 'artifacts/repositories.csv' CSV HEADER"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: github-data
-          path: dump/github_data.sql
+          name: gh-repos
+          path: artifacts/*.csv
