@@ -2,63 +2,70 @@ name: Crawl GitHub Stars (Node.js)
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: '0 3 * * *'
 
 jobs:
-  crawl-stars:
+  crawl:
     runs-on: ubuntu-latest
-
     services:
       postgres:
         image: postgres:15
-        ports:
-          - 5432:5432
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: github_data
+        ports:
+          - 5432:5432
         options: >-
-          --health-cmd="pg_isready -U postgres"
+          --health-cmd="pg_isready -U postgres -d github_data"
           --health-interval=10s
           --health-timeout=5s
           --health-retries=5
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Node.js
+      - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: 20
 
-      - name: Install dependencies
-        run: npm install
+      - name: Install deps
+        run: npm ci
 
-      - name: Setup Postgres schema
+      - name: Wait for Postgres
+        run: |
+          for i in $(seq 1 30); do
+            pg_isready -h localhost -p 5432 -U postgres && break
+            echo "Waiting for postgres..."
+            sleep 2
+          done
+
+      - name: Apply schema
         env:
           PGPASSWORD: postgres
         run: |
-          sudo apt-get install -y postgresql-client
-          psql -h localhost -U postgres -d github_data -f schema.sql
+          psql -h localhost -U postgres -d github_data -f schema/schema.sql
 
-      - name: Run GitHub crawler
+      - name: Run crawler
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DB_HOST: localhost
           DB_USER: postgres
           DB_PASS: postgres
           DB_NAME: github_data
-        run: node crawl_stars.js --target 100000
+        run: node src/interfaces/cli/crawl.js --target=100000
 
-      - name: Dump database and upload artifact
+      - name: Export repositories CSV
         env:
           PGPASSWORD: postgres
         run: |
-          mkdir -p dump
-          pg_dump -h localhost -U postgres -d github_data > dump/github_data.sql
+          mkdir -p artifacts
+          psql -h localhost -U postgres -d github_data -c "\copy (SELECT * FROM repositories) TO 'artifacts/repositories.csv' CSV HEADER"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: github-data
-          path: dump/github_data.sql
+          name: gh-repos
+          path: artifacts/*.csv
