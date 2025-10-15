@@ -147,6 +147,6 @@ async function crawl(target = 100000) {
 
 // CLI argument
 const targetArg = process.argv.find((a) => a.startsWith("--target="));
-const target = targetArg ? parseInt(targetArg.split("=")[1]) : 100;
+const target = targetArg ? parseInt(targetArg.split("=")[1]) : 100000;
 
 crawl(target).catch((err) => console.error("Error:", err));
