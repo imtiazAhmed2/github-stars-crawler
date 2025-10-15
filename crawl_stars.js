@@ -1,19 +1,18 @@
 import fetch from "node-fetch";
 import pg from "pg";
-import process from "process";
-
 const { Client } = pg;
 
-// Environment variables
 const TOKEN = process.env.GITHUB_TOKEN;
-const DB_HOST = process.env.DB_HOST || "localhost";
-const DB_USER = process.env.DB_USER || "postgres";
-const DB_PASS = process.env.DB_PASS || "postgres";
-const DB_NAME = process.env.DB_NAME || "github_data";
-
 const GRAPHQL_URL = "https://api.github.com/graphql";
 
-async function runQuery(query, variables = {}) {
+const client = new Client({
+  host: "localhost",
+  user: "postgres",
+  password: "postgres",
+  database: "github_data",
+});
+
+async function runQuery(query, variables) {
   const res = await fetch(GRAPHQL_URL, {
     method: "POST",
     headers: {
@@ -22,35 +21,27 @@ async function runQuery(query, variables = {}) {
     },
     body: JSON.stringify({ query, variables }),
   });
-
-  if (!res.ok) {
-    console.log("Error:", res.status);
-    await new Promise((r) => setTimeout(r, 5000));
-    return null;
-  }
-
   const json = await res.json();
-  if (json.errors) {
-    console.log("GraphQL errors:", json.errors);
-    await new Promise((r) => setTimeout(r, 5000));
+  if (!res.ok || json.errors) {
+    console.error("Query error:", json.errors || res.status);
+    await new Promise(r => setTimeout(r, 5000));
     return null;
   }
   return json.data;
 }
 
-async function upsertRepo(client, repo) {
-  const query1 = `
+async function upsertRepo(repo) {
+  const q1 = `
     INSERT INTO repositories (repo_id, name, owner, full_name, stars, url, fetched_at)
-    VALUES ($1, $2, $3, $4, $5, $6, NOW())
-    ON CONFLICT (repo_id) DO UPDATE
-    SET stars = EXCLUDED.stars, fetched_at = EXCLUDED.fetched_at;
+    VALUES ($1,$2,$3,$4,$5,$6,NOW())
+    ON CONFLICT (repo_id) DO UPDATE SET stars=EXCLUDED.stars, fetched_at=EXCLUDED.fetched_at;
   `;
-  const query2 = `
+  const q2 = `
     INSERT INTO repo_stars_daily (repo_id, stars)
-    VALUES ($1, $2)
-    ON CONFLICT (repo_id, snapshot_date) DO UPDATE SET stars = EXCLUDED.stars;
+    VALUES ($1,$2)
+    ON CONFLICT (repo_id, snapshot_date) DO UPDATE SET stars=EXCLUDED.stars;
   `;
-  await client.query(query1, [
+  await client.query(q1, [
     repo.id,
     repo.name,
     repo.owner.login,
@@ -58,16 +49,13 @@ async function upsertRepo(client, repo) {
     repo.stargazerCount,
     repo.url,
   ]);
-  await client.query(query2, [repo.id, repo.stargazerCount]);
+  await client.query(q2, [repo.id, repo.stargazerCount]);
 }
 
-// ⬇️ new function to crawl by language
-async function crawlLanguage(client, language, targetPerLang, totalTarget, currentCount) {
-  console.log(`\n🌐 Crawling language: ${language}`);
-
+async function crawlSearch(queryString, totalTarget) {
   const query = `
-    query ($cursor: String, $lang: String!) {
-      search(query: $lang, type: REPOSITORY, first: 50, after: $cursor) {
+    query ($cursor: String, $q: String!) {
+      search(query: $q, type: REPOSITORY, first: 50, after: $cursor) {
         repositoryCount
         pageInfo { endCursor hasNextPage }
         nodes {
@@ -84,12 +72,10 @@ async function crawlLanguage(client, language, targetPerLang, totalTarget, curre
       rateLimit { remaining resetAt }
     }
   `;
+  let cursor = null, count = 0;
 
-  let cursor = null;
-  let langCount = 0;
-
-  while (langCount < targetPerLang && currentCount < totalTarget) {
-    const data = await runQuery(query, { cursor, lang: `language:${language} stars:>10` });
+  while (count < totalTarget) {
+    const data = await runQuery(query, { cursor, q: queryString });
     if (!data) continue;
 
     const repos = data.search.nodes;
@@ -97,59 +83,53 @@ async function crawlLanguage(client, language, targetPerLang, totalTarget, curre
     const rate = data.rateLimit;
 
     for (const repo of repos) {
-      await upsertRepo(client, repo);
-      langCount++;
-      currentCount++;
-      console.log(`💾 ${repo.nameWithOwner} (${repo.stargazerCount}⭐) [${currentCount}/${totalTarget}]`);
-
-      if (langCount >= targetPerLang || currentCount >= totalTarget) break;
+      await upsertRepo(repo);
+      count++;
+      console.log(`💾 ${repo.nameWithOwner} (${repo.stargazerCount}⭐) — ${count}`);
     }
 
     cursor = pageInfo.endCursor;
     if (!pageInfo.hasNextPage) break;
 
-    if (rate.remaining < 10) {
-      const resetTime = new Date(rate.resetAt).getTime();
-      const waitSec = Math.max((resetTime - Date.now()) / 1000, 10);
-      console.log(`⏳ Rate limit reached. Waiting ${Math.ceil(waitSec)}s...`);
-      await new Promise((r) => setTimeout(r, waitSec * 1000));
+    if (rate.remaining < 5) {
+      const wait = Math.max((new Date(rate.resetAt) - Date.now()) / 1000, 10);
+      console.log(`⏳ Waiting ${Math.ceil(wait)}s for rate reset...`);
+      await new Promise(r => setTimeout(r, wait * 1000));
     }
   }
 
-  console.log(`✅ Finished language: ${language} (${langCount} repos)\n`);
-  return currentCount;
+  console.log(`✅ Finished search: ${queryString} (${count} repos)`);
+  return count;
 }
 
-async function crawl(totalTarget = 100000) {
-  console.log(`Fetching up to ${totalTarget} repositories...`);
-
-  const client = new Client({
-    host: DB_HOST,
-    user: DB_USER,
-    password: DB_PASS,
-    database: DB_NAME,
-  });
+async function crawlAll() {
   await client.connect();
 
-  const languages = [
-    "JavaScript", "Python", "Java", "Go", "C++", "C#", "TypeScript",
-    "PHP", "Ruby", "Swift", "Rust", "Kotlin", "Dart", "Scala", "Elixir"
+  const languages = ["JavaScript", "Python", "Java", "Go", "TypeScript","C++","PHP", "Ruby", "Swift", "Rust"];
+  const starRanges = [
+    "stars:>10000",
+    "stars:5000..9999",
+    "stars:1000..4999",
+    "stars:500..999",
+    "stars:100..499",
+    "stars:50..99",
+    "stars:10..49"
   ];
 
-  const targetPerLang = Math.ceil(totalTarget / languages.length);
-  let currentCount = 0;
-
+  let total = 0;
   for (const lang of languages) {
-    currentCount = await crawlLanguage(client, lang, targetPerLang, totalTarget, currentCount);
-    if (currentCount >= totalTarget) break;
+    for (const range of starRanges) {
+      const q = `language:${lang} ${range}`;
+      console.log(`\n🚀 Crawling ${q}`);
+      const count = await crawlSearch(q, 1000);
+      total += count;
+      if (total >= 100000) break;
+    }
+    if (total >= 100000) break;
   }
 
+  console.log(`🎯 Total collected: ${total} repositories`);
   await client.end();
-  console.log("🎯 Done crawling all languages.");
 }
 
-// CLI argument
-const targetArg = process.argv.find((a) => a.startsWith("--target="));
-const target = targetArg ? parseInt(targetArg.split("=")[1]) : 100000;
-
-crawl(target).catch((err) => console.error("Error:", err));
+crawlAll().catch(console.error);
