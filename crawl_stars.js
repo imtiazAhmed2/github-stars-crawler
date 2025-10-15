@@ -61,7 +61,7 @@ async function upsertRepo(client, repo) {
   await client.query(query2, [repo.id, repo.stargazerCount]);
 }
 
-async function crawl(target = 100) {
+async function crawl(target = 100000) {
   console.log(`Fetching ${target} repositories...`);
 
   const client = new Client({
