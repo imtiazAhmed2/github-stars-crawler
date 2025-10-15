@@ -71,7 +71,8 @@ jobs:
           DB_USER: postgres
           DB_PASS: postgres
           DB_NAME: github_data
-        run: node crawler.js --target=100000
+        run: node crawl_stars.js --target=100000
+
 
       - name: Dump database to CSV
         run: |
