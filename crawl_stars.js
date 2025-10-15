@@ -105,7 +105,9 @@ async function crawlSearch(queryString, totalTarget) {
 async function crawlAll() {
   await client.connect();
 
-  const languages = ["JavaScript", "Python", "Java", "Go", "TypeScript","C++","PHP", "Ruby", "Swift", "Rust"];
+  const languages = ["JavaScript","Python","Java","TypeScript","C++","C","C#","Go","PHP","Ruby","Swift","Kotlin","Rust","Scala","Dart","Shell","R","Objective-C",
+                     "Perl","Haskell","Lua","Elixir","Clojure","Julia","VBA","Visual Basic","MATLAB","PowerShell","Groovy","Assembly","F#","Erlang","Vim Script",
+                     "PL/SQL","Fortran"];
   const starRanges = [
     "stars:>10000",
     "stars:5000..9999",
