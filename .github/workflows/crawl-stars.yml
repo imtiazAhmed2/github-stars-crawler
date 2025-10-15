@@ -1,13 +1,14 @@
-name: Crawl GitHub Stars (Node.js)
+name: Crawl GitHub Stars
 
 on:
-  workflow_dispatch:
-  schedule:
-    - cron: '0 3 * * *'
+  push:
+    branches: [ main ]
+  workflow_dispatch:  # allows manual run
 
 jobs:
-  crawl:
+  crawl-stars:
     runs-on: ubuntu-latest
+
     services:
       postgres:
         image: postgres:15
@@ -18,54 +19,61 @@ jobs:
         ports:
           - 5432:5432
         options: >-
-          --health-cmd="pg_isready -U postgres -d github_data"
-          --health-interval=10s
-          --health-timeout=5s
-          --health-retries=5
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
 
     steps:
-      - uses: actions/checkout@v4
+      # 🧱 Step 1: Checkout your repository
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - name: Setup Node
+      # 🧰 Step 2: Set up Node.js
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      - name: Install deps
-        run: npm ci
+      # 📦 Step 3: Install dependencies
+      # ✅ If you have package-lock.json, you can switch back to npm ci
+      - name: Install dependencies
+        run: npm install
 
-      - name: Wait for Postgres
+      # 🗃️ Step 4: Wait for Postgres to be ready
+      - name: Wait for PostgreSQL
         run: |
-          for i in $(seq 1 30); do
-            pg_isready -h localhost -p 5432 -U postgres && break
-            echo "Waiting for postgres..."
+          echo "⏳ Waiting for PostgreSQL to start..."
+          until pg_isready -h localhost -U postgres; do
             sleep 2
           done
+          echo "✅ PostgreSQL is ready."
 
-      - name: Apply schema
-        env:
-          PGPASSWORD: postgres
+      # 🏗️ Step 5: Create schema and tables
+      - name: Setup database schema
         run: |
-          psql -h localhost -U postgres -d github_data -f schema/schema.sql
+          PGPASSWORD=postgres psql -h localhost -U postgres -d github_data -f schema.sql
 
-      - name: Run crawler
+      # 🚀 Step 6: Run crawler
+      - name: Run crawler to fetch 100,000 repos
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          DB_HOST: localhost
-          DB_USER: postgres
-          DB_PASS: postgres
-          DB_NAME: github_data
-        run: node src/interfaces/cli/crawl.js --target=100000
-
-      - name: Export repositories CSV
-        env:
+          PGHOST: localhost
+          PGUSER: postgres
           PGPASSWORD: postgres
-        run: |
-          mkdir -p artifacts
-          psql -h localhost -U postgres -d github_data -c "\copy (SELECT * FROM repositories) TO 'artifacts/repositories.csv' CSV HEADER"
+          PGDATABASE: github_data
+        run: node crawl_stars.js
 
-      - name: Upload artifact
+      # 📤 Step 7: Export data to CSV for artifact upload
+      - name: Dump database to CSV
+        run: |
+          mkdir -p dumps
+          PGPASSWORD=postgres psql -h localhost -U postgres -d github_data -c "\copy repositories TO 'dumps/repositories.csv' CSV HEADER"
+          PGPASSWORD=postgres psql -h localhost -U postgres -d github_data -c "\copy repo_stars_daily TO 'dumps/repo_stars_daily.csv' CSV HEADER"
+
+      # 📦 Step 8: Upload as artifact
+      - name: Upload crawl results
         uses: actions/upload-artifact@v4
         with:
-          name: gh-repos
-          path: artifacts/*.csv
+          name: github-repo-stars
+          path: dumps/
