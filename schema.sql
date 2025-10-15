@@ -1,4 +1,4 @@
--- schema/schema.sql
+-- schema.sql
 
 -- canonical repo table (latest metadata)
 CREATE TABLE IF NOT EXISTS repositories (
@@ -10,19 +10,19 @@ CREATE TABLE IF NOT EXISTS repositories (
   url TEXT,
   stargazers INTEGER,
   repo_json JSONB,
-  updated_at TIMESTAMPTZ,
-  last_crawled_at TIMESTAMPTZ
+  updated_at TIMESTAMP WITH TIME ZONE,
+  last_crawled_at TIMESTAMP WITH TIME ZONE
 );
 
--- daily (immutable) snapshot table
+-- daily snapshots (one row per repo per day)
 CREATE TABLE IF NOT EXISTS repo_stars_daily (
   repo_id TEXT NOT NULL REFERENCES repositories(repo_id),
-  snapshot_date DATE NOT NULL DEFAULT CURRENT_DATE,
+  snapshot_date DATE NOT NULL,
   stargazers INTEGER NOT NULL,
   PRIMARY KEY (repo_id, snapshot_date)
 );
 
--- crawl run audit
+-- audit table for run-level tracking
 CREATE TABLE IF NOT EXISTS crawl_runs (
   id SERIAL PRIMARY KEY,
   started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -30,14 +30,16 @@ CREATE TABLE IF NOT EXISTS crawl_runs (
   repos_fetched INTEGER DEFAULT 0
 );
 
--- progress/resume helper per partition
+-- progress table to support resume: stores what (language/starRange) was last processed
 CREATE TABLE IF NOT EXISTS crawl_progress (
-  kind TEXT NOT NULL,
-  key TEXT NOT NULL,
-  cursor TEXT,
+  id SERIAL PRIMARY KEY,
+  kind TEXT NOT NULL,         -- e.g. 'language_range'
+  key TEXT NOT NULL,          -- e.g. 'language:JavaScript|stars:100..499'
+  cursor TEXT,                -- GraphQL endCursor for resuming
   completed BOOLEAN DEFAULT FALSE,
   updated_at TIMESTAMPTZ DEFAULT now(),
-  PRIMARY KEY (kind, key)
+  UNIQUE(kind, key)
 );
 
+-- small helper index to speed queries on last_crawled_at
 CREATE INDEX IF NOT EXISTS idx_repos_last_crawled ON repositories(last_crawled_at);
