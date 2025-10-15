@@ -48,7 +48,7 @@ jobs:
           DB_USER: postgres
           DB_PASS: postgres
           DB_NAME: github_data
-        run: node crawl_stars.js --target 100
+        run: node crawl_stars.js --target 100000
 
       - name: Dump database and upload artifact
         env:
